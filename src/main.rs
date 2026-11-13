@@ -19,17 +19,11 @@ pub struct Config {
     pub prefer_opengl: bool,
 }
 
-fn yes() -> bool {
-    true
-}
+fn yes() -> bool { true }
 
 impl Default for Config {
     fn default() -> Self {
-        let game_dir = dirs::data_dir()
-            .unwrap_or_default()
-            .join(".minecraft")
-            .to_string_lossy()
-            .to_string();
+        let game_dir = dirs::data_dir().unwrap_or_default().join(".minecraft").to_string_lossy().to_string();
         Self {
             nickname: "Player".into(),
             version: String::new(),
@@ -58,194 +52,318 @@ fn save_config(c: &Config) {
     if let Ok(s) = serde_json::to_string_pretty(c) { let _ = std::fs::write(p, s); }
 }
 
-#[derive(PartialEq)]
+#[derive(PartialEq, Clone, Copy)]
 enum Tab { Home, Settings }
 
 struct App {
     cfg: Config,
     versions: Vec<String>,
     tab: Tab,
+    editing_nick: bool,
     status: Arc<Mutex<(String, bool)>>,
 }
 
-const BG: Color32 = Color32::from_rgb(10, 10, 10);
-const BORDER: Color32 = Color32::from_rgb(38, 38, 38);
-const MUTED: Color32 = Color32::from_rgb(130, 130, 130);
+const BG: Color32 = Color32::from_rgb(12, 12, 14);
+const PANEL: Color32 = Color32::from_rgb(18, 18, 21);
+const PANEL_2: Color32 = Color32::from_rgb(24, 24, 28);
+const BORDER: Color32 = Color32::from_rgb(42, 42, 48);
+const MUTED: Color32 = Color32::from_rgb(137, 137, 148);
+const WHITE: Color32 = Color32::from_rgb(239, 239, 243);
 
 impl App {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let mut v = egui::Visuals::dark();
         v.panel_fill = Color32::TRANSPARENT;
         v.window_fill = BG;
-        v.override_text_color = Some(Color32::from_gray(225));
-        let rounding = Rounding::same(8.0);
+        v.override_text_color = Some(WHITE);
+        v.widgets.noninteractive.bg_fill = PANEL;
+        v.widgets.noninteractive.bg_stroke = Stroke::new(1.0, BORDER);
+        v.widgets.noninteractive.rounding = Rounding::same(9.0);
         for (w, fill) in [
-            (&mut v.widgets.inactive, 20u8),
-            (&mut v.widgets.hovered, 36),
-            (&mut v.widgets.active, 52),
+            (&mut v.widgets.inactive, Color32::from_rgb(28, 28, 32)),
+            (&mut v.widgets.hovered, Color32::from_rgb(43, 43, 49)),
+            (&mut v.widgets.active, Color32::from_rgb(57, 57, 65)),
         ] {
-            w.bg_fill = Color32::from_gray(fill);
-            w.weak_bg_fill = Color32::from_gray(fill);
-            w.rounding = rounding;
+            w.bg_fill = fill;
+            w.weak_bg_fill = fill;
+            w.rounding = Rounding::same(8.0);
             w.bg_stroke = Stroke::new(1.0, BORDER);
         }
-        v.widgets.noninteractive.rounding = rounding;
-        v.selection.bg_fill = Color32::from_gray(70);
+        v.selection.bg_fill = Color32::from_rgb(75, 75, 84);
         cc.egui_ctx.set_visuals(v);
 
-        let cfg = load_config();
+        let mut cfg = load_config();
         let versions = launch::list_versions(&cfg.game_dir);
-        let mut cfg = cfg;
         if cfg.version.is_empty() || !versions.contains(&cfg.version) {
             cfg.version = versions.first().cloned().unwrap_or_default();
         }
-        Self { cfg, versions, tab: Tab::Home, status: Arc::new(Mutex::new((String::new(), false))) }
+
+        Self {
+            cfg,
+            versions,
+            tab: Tab::Home,
+            editing_nick: false,
+            status: Arc::new(Mutex::new((String::new(), false))),
+        }
     }
 
-    fn busy(&self) -> bool { self.status.lock().map(|s| s.1).unwrap_or(false) }
+    fn busy(&self) -> bool {
+        self.status.lock().map(|s| s.1).unwrap_or(false)
+    }
 
     fn play(&mut self) {
         save_config(&self.cfg);
-        *self.status.lock().unwrap() = ("Запуск...".into(), true);
+        *self.status.lock().unwrap() = ("Подготовка к запуску…".into(), true);
         let status = self.status.clone();
         let cfg = self.cfg.clone();
+
         std::thread::spawn(move || {
             let set = |t: String, b: bool| *status.lock().unwrap() = (t, b);
             match launch::launch(&cfg) {
-                Ok(mut c) => {
+                Ok(mut child) => {
                     set("Игра запущена".into(), true);
-                    match c.wait() {
+                    match child.wait() {
                         Ok(st) if st.success() => set("Игра закрыта".into(), false),
                         other => {
                             let code = other.ok().and_then(|x| x.code());
-                            set(format!("Игра упала (код {:?}). Лог:\n{}", code, launch::log_tail(15)), false);
+                            set(format!("Игра завершилась с ошибкой (код {:?}). Лог: {}", code, launch::log_path().display()), false);
                         }
                     }
                 }
-                Err(e) => set(format!("Ошибка: {e}"), false),
+                Err(e) => set(format!("Ошибка запуска: {e}"), false),
             }
         });
+    }
+
+    fn refresh_versions(&mut self) {
+        self.versions = launch::list_versions(&self.cfg.game_dir);
+        if !self.versions.contains(&self.cfg.version) {
+            self.cfg.version = self.versions.first().cloned().unwrap_or_default();
+        }
     }
 }
 
 impl eframe::App for App {
-    fn clear_color(&self, _: &egui::Visuals) -> [f32; 4] { [0.0; 4] }
+    fn clear_color(&self, _: &egui::Visuals) -> [f32; 4] { [0.0, 0.0, 0.0, 0.0] }
 
     fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
         if self.busy() { ctx.request_repaint_after(Duration::from_millis(300)); }
 
-        // скруглённый фон окна
         let rect = ctx.screen_rect().shrink(1.0);
-        let p = ctx.layer_painter(egui::LayerId::background());
-        p.rect_filled(rect, Rounding::same(14.0), BG);
-        p.rect_stroke(rect, Rounding::same(14.0), Stroke::new(1.0, BORDER));
+        let painter = ctx.layer_painter(egui::LayerId::background());
+        painter.rect_filled(rect, Rounding::same(14.0), BG);
+        painter.rect_stroke(rect, Rounding::same(14.0), Stroke::new(1.0, BORDER));
 
-        // верхняя панель
-        egui::TopBottomPanel::top("top")
-            .exact_height(46.0)
-            .frame(Frame::none().inner_margin(Margin::symmetric(18.0, 10.0)))
+        egui::TopBottomPanel::top("top_bar")
+            .exact_height(52.0)
+            .frame(Frame::none().fill(PANEL).inner_margin(Margin::symmetric(18.0, 8.0)))
             .show(ctx, |ui| {
-                let drag = ui.interact(ui.max_rect(), egui::Id::new("drag"), Sense::click_and_drag());
-                if drag.drag_started() { ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag); }
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new("BLACK").strong().size(16.0));
-                    ui.label(RichText::new("v0.1.0").size(12.0).color(MUTED));
+                let drag = ui.interact(ui.max_rect(), egui::Id::new("window_drag"), Sense::click_and_drag());
+                if drag.drag_started() {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+                }
+
+                ui.horizontal_centered(|ui| {
+                    ui.label(RichText::new("BLACK").size(16.0).strong().color(WHITE));
+                    ui.label(RichText::new("LAUNCHER").size(10.0).strong().color(MUTED));
+                    ui.label(RichText::new("  /  v0.1.0").size(11.0).color(MUTED));
+
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.add(egui::Button::new("x").frame(false)).clicked() {
+                        if ui.add_sized([28.0, 27.0], egui::Button::new("×").frame(false)).clicked() {
                             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                         }
-                        if ui.add(egui::Button::new("-").frame(false)).clicked() {
-                            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+                        if ui.add_sized([28.0, 27.0], egui::Button::new("□").frame(false)).clicked() {
+                            let full = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(!full));
                         }
-                        ui.add_space(10.0);
-                        let name = self.cfg.nickname.clone();
-                        if ui.add(egui::Button::new(RichText::new(format!("●  {name}")).size(13.0))).clicked() {
-                            self.tab = Tab::Settings;
+                        if ui.add_sized([28.0, 27.0], egui::Button::new("—").frame(false)).clicked() {
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
                         }
                     });
                 });
             });
 
-        // меню слева
-        egui::SidePanel::left("nav")
-            .exact_width(150.0)
+        egui::SidePanel::left("sidebar")
+            .exact_width(205.0)
             .resizable(false)
-            .frame(Frame::none().inner_margin(Margin::symmetric(16.0, 8.0)))
+            .frame(Frame::none().fill(PANEL).inner_margin(Margin::same(16.0)))
             .show(ctx, |ui| {
                 ui.add_space(8.0);
-                for (t, name) in [(Tab::Home, "Главная"), (Tab::Settings, "Настройки")] {
-                    let sel = self.tab == t;
-                    let txt = RichText::new(name).size(14.0).color(if sel { Color32::WHITE } else { MUTED });
-                    if ui.add_sized([118.0, 34.0], egui::SelectableLabel::new(sel, txt)).clicked() {
-                        self.tab = t;
+
+                let (avatar_rect, _) = ui.allocate_exact_size(Vec2::splat(58.0), Sense::hover());
+                let center = avatar_rect.center();
+                ui.painter().circle_filled(center, 28.0, PANEL_2);
+                ui.painter().circle_stroke(center, 28.0, Stroke::new(1.0, BORDER));
+                ui.painter().line_segment(
+                    [center + Vec2::new(-8.0, -8.0), center + Vec2::new(8.0, 8.0)],
+                    Stroke::new(2.0, MUTED),
+                );
+                ui.painter().line_segment(
+                    [center + Vec2::new(8.0, -8.0), center + Vec2::new(-8.0, 8.0)],
+                    Stroke::new(2.0, MUTED),
+                );
+
+                ui.add_space(9.0);
+                ui.label(RichText::new("ВАШ ПРОФИЛЬ").size(9.0).strong().color(MUTED));
+                if self.editing_nick {
+                    let response = ui.add(egui::TextEdit::singleline(&mut self.cfg.nickname).desired_width(165.0));
+                    if response.lost_focus() || ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                        self.editing_nick = false;
+                        if self.cfg.nickname.trim().is_empty() { self.cfg.nickname = "Player".into(); }
+                        save_config(&self.cfg);
                     }
+                    response.request_focus();
+                } else {
+                    let nick = if self.cfg.nickname.trim().is_empty() { "Player" } else { &self.cfg.nickname };
+                    let response = ui.add(egui::Label::new(RichText::new(nick).size(15.0).strong()).sense(Sense::click()));
+                    if response.double_clicked() { self.editing_nick = true; }
+                    response.on_hover_text("Двойной клик — изменить ник");
                 }
+                ui.add_space(28.0);
+                ui.label(RichText::new("МЕНЮ").size(9.0).strong().color(MUTED));
+                ui.add_space(8.0);
+
+                for (tab, label, hint) in [
+                    (Tab::Home, "Главная", "Обзор и запуск игры"),
+                    (Tab::Settings, "Настройки", "Параметры лаунчера"),
+                ] {
+                    let selected = self.tab == tab;
+                    let fill = if selected { PANEL_2 } else { Color32::TRANSPARENT };
+                    let color = if selected { WHITE } else { MUTED };
+                    let response = ui.add_sized(
+                        [172.0, 42.0],
+                        egui::Button::new(RichText::new(label).size(14.0).color(color))
+                            .fill(fill)
+                            .stroke(if selected { Stroke::new(1.0, BORDER) } else { Stroke::NONE }),
+                    );
+                    if response.clicked() { self.tab = tab; }
+                    response.on_hover_text(hint);
+                    ui.add_space(5.0);
+                }
+
+                ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
+                    ui.label(RichText::new("BLACK LAUNCHER").size(9.0).color(MUTED));
+                    ui.label(RichText::new("Локальный профиль").size(10.0).color(MUTED));
+                });
             });
 
         egui::CentralPanel::default()
-            .frame(Frame::none().inner_margin(Margin::same(24.0)))
-            .show(ctx, |ui| match self.tab {
-                Tab::Home => {
-                    ui.vertical_centered(|ui| {
-                        ui.add_space(70.0);
-                        ui.label(RichText::new("BLACK").size(44.0).strong());
-                        ui.label(RichText::new("минималистичный клиент").color(MUTED));
-                        ui.add_space(36.0);
-                        egui::ComboBox::from_id_salt("ver")
-                            .width(220.0)
-                            .selected_text(if self.cfg.version.is_empty() { "нет версий".into() } else { self.cfg.version.clone() })
-                            .show_ui(ui, |ui| {
-                                for v in self.versions.clone() {
-                                    ui.selectable_value(&mut self.cfg.version, v.clone(), v);
-                                }
-                            });
-                        ui.add_space(18.0);
-                        let busy = self.busy();
-                        let btn = egui::Button::new(RichText::new("ИГРАТЬ").size(18.0).strong().color(Color32::BLACK))
-                            .fill(Color32::WHITE)
-                            .rounding(10.0)
-                            .min_size(Vec2::new(220.0, 52.0));
-                        if ui.add_enabled(!busy && !self.cfg.version.is_empty(), btn).clicked() {
-                            self.play();
-                        }
-                        ui.add_space(14.0);
-                        let s = self.status.lock().unwrap().0.clone();
-                        egui::ScrollArea::vertical().max_height(170.0).show(ui, |ui| {
-                            ui.label(RichText::new(s).size(11.0).color(MUTED));
+            .frame(Frame::none().inner_margin(Margin::same(28.0)))
+            .show(ctx, |ui| {
+                match self.tab {
+                    Tab::Home => {
+                        ui.vertical_centered(|ui| {
+                            ui.add_space(35.0);
+                            ui.label(RichText::new("ТВОЯ ИГРА. ТВОИ ПРАВИЛА.").size(10.0).strong().color(MUTED));
+                            ui.add_space(10.0);
+                            ui.label(RichText::new("Добро пожаловать").size(30.0).strong().color(WHITE));
+                            ui.label(RichText::new("Выбери версию и возвращайся в игру").size(13.0).color(MUTED));
+                            ui.add_space(38.0);
+
+                            let width = ui.available_width().min(470.0);
+                            ui.allocate_ui_with_layout(
+                                Vec2::new(width, ui.available_height()),
+                                egui::Layout::top_down(egui::Align::Center),
+                                |ui| {
+                                    Frame::none()
+                                        .fill(PANEL)
+                                        .stroke(Stroke::new(1.0, BORDER))
+                                        .rounding(Rounding::same(12.0))
+                                        .inner_margin(Margin::same(18.0))
+                                        .show(ui, |ui| {
+                                            ui.set_width((width - 38.0).max(220.0));
+                                            ui.horizontal(|ui| {
+                                                ui.label(RichText::new("ВЕРСИЯ ИГРЫ").size(10.0).strong().color(MUTED));
+                                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                                    if ui.small_button("Обновить список").clicked() { self.refresh_versions(); }
+                                                });
+                                            });
+                                            ui.add_space(10.0);
+                                            egui::ComboBox::from_id_salt("version_picker")
+                                                .width(ui.available_width())
+                                                .selected_text(if self.cfg.version.is_empty() {
+                                                "Версии не найдены".to_string()
+                                                } else {
+                                                        self.cfg.version.clone()
+                                            })
+                                                .show_ui(ui, |ui| {
+                                                    for version in self.versions.clone() {
+                                                        ui.selectable_value(&mut self.cfg.version, version.clone(), version);
+                                                    }
+                                                });
+                                            ui.add_space(16.0);
+                                            let busy = self.busy();
+                                            let button = egui::Button::new(
+                                                RichText::new(if busy { "ЗАПУСК..." } else { "ИГРАТЬ" })
+                                                    .size(16.0).strong().color(Color32::from_rgb(15, 15, 17))
+                                            )
+                                            .fill(Color32::from_rgb(238, 238, 242))
+                                            .rounding(Rounding::same(9.0))
+                                            .min_size(Vec2::new(ui.available_width(), 48.0));
+                                            if ui.add_enabled(!busy && !self.cfg.version.is_empty(), button).clicked() {
+                                                self.play();
+                                            }
+                                            if self.versions.is_empty() {
+                                                ui.add_space(9.0);
+                                                ui.label(RichText::new("Папка versions пуста. Добавь установленную версию игры.").size(10.0).color(MUTED));
+                                            }
+                                        });
+
+                                    ui.add_space(14.0);
+                                    let status = self.status.lock().map(|s| s.0.clone()).unwrap_or_default();
+                                    if !status.is_empty() {
+                                        Frame::none().fill(PANEL).rounding(Rounding::same(8.0))
+                                            .inner_margin(Margin::same(12.0)).show(ui, |ui| {
+                                                ui.set_width((width - 24.0).max(200.0));
+                                                ui.label(RichText::new(status).size(11.0).color(MUTED));
+                                            });
+                                    }
+                                    ui.add_space(10.0);
+                                    if ui.link(RichText::new("Открыть игровой лог").size(11.0).color(MUTED)).clicked() {
+                                        let _ = std::process::Command::new(if cfg!(windows) { "notepad" } else { "xdg-open" })
+                                            .arg(launch::log_path()).spawn();
+                                    }
+                                },
+                            );
                         });
-                        if ui.button("Открыть лог").clicked() {
-                            let _ = std::process::Command::new(if cfg!(windows) { "notepad" } else { "xdg-open" })
-                                .arg(launch::log_path())
-                                .spawn();
-                        }
-                    });
-                }
-                Tab::Settings => {
-                    ui.label(RichText::new("Настройки").size(22.0).strong());
-                    ui.add_space(16.0);
-                    ui.label("Ник (офлайн аккаунт)");
-                    ui.add(egui::TextEdit::singleline(&mut self.cfg.nickname).desired_width(300.0));
-                    ui.add_space(10.0);
-                    ui.label("Оперативная память (МБ)");
-                    ui.add(egui::Slider::new(&mut self.cfg.ram_mb, 1024..=16384).step_by(512.0));
-                    ui.add_space(10.0);
-                    ui.label("Java (javaw или полный путь)");
-                    ui.add(egui::TextEdit::singleline(&mut self.cfg.java_path).desired_width(420.0));
-                    ui.add_space(10.0);
-                    ui.label("Папка игры (.minecraft)");
-                    ui.add(egui::TextEdit::singleline(&mut self.cfg.game_dir).desired_width(420.0));
-                    ui.add_space(12.0);
-                    ui.checkbox(&mut self.cfg.prefer_opengl, "Использовать OpenGL вместо Vulkan (для старых видеокарт)");
-                    ui.add_space(18.0);
-                    ui.horizontal(|ui| {
-                        if ui.button("Сохранить").clicked() { save_config(&self.cfg); }
-                        if ui.button("Обновить версии").clicked() {
-                            self.versions = launch::list_versions(&self.cfg.game_dir);
-                            if !self.versions.contains(&self.cfg.version) {
-                                self.cfg.version = self.versions.first().cloned().unwrap_or_default();
-                            }
-                        }
-                    });
+                    }
+                    Tab::Settings => {
+                        ui.label(RichText::new("Настройки").size(27.0).strong());
+                        ui.label(RichText::new("Настрой лаунчер под себя").size(12.0).color(MUTED));
+                        ui.add_space(24.0);
+
+                        Frame::none().fill(PANEL).stroke(Stroke::new(1.0, BORDER))
+                            .rounding(Rounding::same(12.0)).inner_margin(Margin::same(18.0))
+                            .show(ui, |ui| {
+                                ui.set_max_width(620.0);
+                                ui.label(RichText::new("АККАУНТ").size(10.0).strong().color(MUTED));
+                                ui.add_space(8.0);
+                                ui.label("Никнейм (офлайн-профиль)");
+                                ui.add(egui::TextEdit::singleline(&mut self.cfg.nickname).desired_width(360.0));
+                                ui.add_space(18.0);
+
+                                ui.label(RichText::new("ПРОИЗВОДИТЕЛЬНОСТЬ").size(10.0).strong().color(MUTED));
+                                ui.add_space(8.0);
+                                ui.label("Оперативная память");
+                                ui.add(egui::Slider::new(&mut self.cfg.ram_mb, 1024..=16384).step_by(512.0).suffix(" МБ"));
+                                ui.add_space(18.0);
+
+                                ui.label(RichText::new("ПУТИ И ФАЙЛЫ").size(10.0).strong().color(MUTED));
+                                ui.add_space(8.0);
+                                ui.label("Java (javaw или полный путь)");
+                                ui.add(egui::TextEdit::singleline(&mut self.cfg.java_path).desired_width(520.0));
+                                ui.add_space(10.0);
+                                ui.label("Папка игры (.minecraft)");
+                                ui.add(egui::TextEdit::singleline(&mut self.cfg.game_dir).desired_width(520.0));
+                                ui.add_space(14.0);
+                                ui.checkbox(&mut self.cfg.prefer_opengl, "Предпочитать OpenGL (для старых видеокарт)");
+                                ui.add_space(18.0);
+                                ui.horizontal(|ui| {
+                                    if ui.button("Сохранить настройки").clicked() { save_config(&self.cfg); }
+                                    if ui.button("Обновить версии").clicked() { self.refresh_versions(); }
+                                });
+                            });
+                    }
                 }
             });
     }
@@ -254,8 +372,9 @@ impl eframe::App for App {
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([920.0, 580.0])
-            .with_min_inner_size([720.0, 460.0])
+            .with_inner_size([1000.0, 650.0])
+            .with_min_inner_size([760.0, 520.0])
+            .with_resizable(true)
             .with_decorations(false)
             .with_transparent(true),
         ..Default::default()
